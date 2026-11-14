@@ -1,0 +1,1 @@
+{"n_estimators": 500, "learning_rate": 0.02, "num_leaves": 15, "min_child_samples": 20, "features": "no_season", "per_hotel": false, "net_profit": 330714, "accepted": 226, "requests": 4609, "log_loss": 0.5229, "auc": 0.8603, "mean_pred": 0.227, "cancel_rate": 0.357, "seconds": 10.5}

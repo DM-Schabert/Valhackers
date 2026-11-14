@@ -1,0 +1,1 @@
+{"C": 1.0, "min_frequency": 20, "features": "no_hindsight", "per_hotel": true, "net_profit": 374720, "accepted": 647, "requests": 4609, "log_loss": 0.5487, "auc": 0.7493, "mean_pred": 0.359, "cancel_rate": 0.357, "seconds": 7.2}
