@@ -1,0 +1,82 @@
+{
+ "jan-aug": {
+  "Downtown Hotel": {
+   "reject_all": 600168.0500000002,
+   "accept_all": -468845.92999999993,
+   "first_come": 2578508.920000001,
+   "hindsight": 2983527.089999998,
+   "requests": 17740,
+   "first_come_accepted": 6909,
+   "hindsight_accepted": 7629
+  },
+  "Seaside Hotel": {
+   "reject_all": 637148.3049999997,
+   "accept_all": -792682.0349999999,
+   "first_come": 1902453.8450000002,
+   "hindsight": 2288212.2750000013,
+   "requests": 9106,
+   "first_come_accepted": 3942,
+   "hindsight_accepted": 4612
+  }
+ },
+ "apr-nov": {
+  "Downtown Hotel": {
+   "reject_all": 1383072.3400000015,
+   "accept_all": -1243331.7949999992,
+   "first_come": 2417496.7199999997,
+   "hindsight": 2635343.4100000006,
+   "requests": 14684,
+   "first_come_accepted": 3871,
+   "hindsight_accepted": 4124
+  },
+  "Seaside Hotel": {
+   "reject_all": 787265.9450000002,
+   "accept_all": -1225619.8000000003,
+   "first_come": 1110475.595,
+   "hindsight": 1169386.3650000005,
+   "requests": 6688,
+   "first_come_accepted": 1376,
+   "hindsight_accepted": 1541
+  }
+ },
+ "jul-dec": {
+  "Downtown Hotel": {
+   "reject_all": 625721.57,
+   "accept_all": -838455.7949999999,
+   "first_come": 1390764.0399999996,
+   "hindsight": 1486014.98,
+   "requests": 9567,
+   "first_come_accepted": 2852,
+   "hindsight_accepted": 2958
+  },
+  "Seaside Hotel": {
+   "reject_all": 84911.71500000008,
+   "accept_all": -849245.39,
+   "first_come": 409239.685,
+   "hindsight": 446754.105,
+   "requests": 4774,
+   "first_come_accepted": 1661,
+   "hindsight_accepted": 1799
+  }
+ },
+ "oct-dec": {
+  "Downtown Hotel": {
+   "reject_all": 332014.46000000014,
+   "accept_all": -64840.30499999982,
+   "first_come": 605664.92,
+   "hindsight": 623112.3099999999,
+   "requests": 3289,
+   "first_come_accepted": 1058,
+   "hindsight_accepted": 1094
+  },
+  "Seaside Hotel": {
+   "reject_all": 151826.655,
+   "accept_all": 42149.22499999998,
+   "first_come": 296096.155,
+   "hindsight": 306456.175,
+   "requests": 2168,
+   "first_come_accepted": 960,
+   "hindsight_accepted": 986
+  }
+ }
+}

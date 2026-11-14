@@ -12,4 +12,4 @@ REPORT_MIN=20                     # hard limit of the report job
 
 QUEUE=""                      # LSF queue / SLURM partition, empty = the cluster's default
 ACCOUNT=""                    # SLURM account, if your cluster needs one
-MODULES=""                    # e.g. "python3/3.11.9" (see: module avail python3), empty = system python3
+MODULES="python3/3.12.4"                    # e.g. "python3/3.11.9" (see: module avail python3), empty = system python3

@@ -1,0 +1,37 @@
+{
+  "scheme": "one_rule",
+  "model": {
+    "model": "blend",
+    "weight": 0.7,
+    "per_hotel": false,
+    "features": "no_calendar",
+    "half_life": 0,
+    "calibration": "none"
+  },
+  "rules": {
+    "Downtown Hotel": {
+      "alpha": 1.1,
+      "z": 0.0,
+      "beta": 0.1
+    },
+    "Seaside Hotel": {
+      "alpha": 1.1,
+      "z": 0.0,
+      "beta": 0.1
+    }
+  },
+  "share": {
+    "jan-aug": 0.6874912814360536,
+    "apr-nov": 0.7108142217505053,
+    "jul-dec": 0.8004558208670428,
+    "oct-dec": 0.8450903183262003
+  },
+  "profit": {
+    "jan-aug": 4010947.0,
+    "apr-nov": 3332087.0,
+    "jul-dec": 1688899.0,
+    "oct-dec": 860521.0
+  },
+  "held_out_share": 0.7395475932174237,
+  "settings_searched": 831
+}
