@@ -116,8 +116,15 @@ if __name__ == "__main__":
     start = test["arrival_date"].min()
     commitments = test[test["booking_date"] < start]  # booked before the test period: already confirmed
     requests = test[test["booking_date"] >= start].sort_values("booking_date", kind="stable")
-    capacity = {hotel: pd.Series(rooms, index=pd.date_range(start, test["arrival_date"].max()))
-                for hotel, rooms in ROOMS.items()}
+    # Free rooms = rooms minus guests who arrived before the test period, showed up and are still in house
+    stayed = rows[(rows["arrival_date"] < start) & (rows["cancelled"] == 0)
+                  & (rows["arrival_date"] + pd.to_timedelta(rows["nights"], unit="D") > start)]
+    capacity = {}
+    for hotel, rooms in ROOMS.items():
+        free = pd.Series(rooms, index=pd.date_range(start, test["arrival_date"].max()))
+        for arrival, nights in zip(stayed.loc[stayed["hotel"] == hotel, "arrival_date"], stayed.loc[stayed["hotel"] == hotel, "nights"]):
+            free.loc[start: arrival + pd.Timedelta(days=int(nights) - 1)] -= 1
+        capacity[hotel] = free.clip(lower=0)
 
     solution = Solution(commitments, capacity, model)
     accepted = [solution.accept(b, p) for b, p in zip(requests.to_dict("records"), solution.p_show(requests))]
