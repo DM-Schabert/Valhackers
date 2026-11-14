@@ -7,45 +7,141 @@ walked: they earn nothing and cost 2.5 x their stay value. A seated guest keeps 
 Your result is the net revenue: revenue of seated guests - walk penalties.
 
 Reading any 2017 data yourself is cheating.
+
+Run `python train-template-kit/solution.py`: trains on TRAIN_FILE + VALID_FILE, prints the net profit on TEST_FILE.
 """
+import json
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 import pandas as pd
 
-# prep.py lives in the repo root; resolve it relative to this file so the cwd doesn't matter
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT))
-import prep  # noqa: E402  (shared cleaning + features, see cleaning_steps.md)
+HERE = Path(__file__).resolve().parent
+sys.path[:0] = [str(HERE), str(HERE.parent)]  # train.py is next to this file, prep.py in the repo root
+import prep  # noqa: E402
+from train import MODEL, train  # noqa: E402
 
-PARAMS_PATH = REPO_ROOT / "data" / "prep_params.json"
+# =============================================================================================
+# INPUT FILES (preprocessed .parquet or .csv with the train.csv columns + features)
+# =============================================================================================
+DATA = HERE.parent / "data"
+SPLITS = DATA / "splits_minimal" 
+TRAIN_FILE = SPLITS / "train.parquet"
+VALID_FILE = SPLITS / "valid.parquet"
+TEST_FILE = SPLITS / "test.parquet"
+PARAMS_FILE = None # DATA / "prep_params_dev.json"  # optional, None for splits_minimal; evaluate.py needs it for raw bookings
+# =============================================================================================
+
+PER_HOTEL = False  # submission: False = one model for both hotels, True = one model per hotel
+
+ROOMS = {"Downtown Hotel": 124, "Seaside Hotel": 103}
+NOT_FEATURES = ["cancelled", "booking_id", "arrival_year", "arrival_date", "booking_date",
+                "split", "is_commitment", "use_for_occupancy", "stay_value"]
+PARAMS = json.loads(PARAMS_FILE.read_text()) if PARAMS_FILE and PARAMS_FILE.exists() else None
+
+
+def load(path):
+    df = pd.read_parquet(path) if path.suffix == ".parquet" else pd.read_csv(path)
+    df["arrival_date"] = pd.to_datetime(df["arrival_date"])
+    df["booking_date"] = pd.to_datetime(df["booking_date"])
+    return df
+
+
+def features(df):
+    """From the params file if given, else every numeric / category column that is no label, id or date."""
+    if PARAMS:
+        return PARAMS["features"]
+    return [c for c in df.select_dtypes(["number", "category"]).columns if c not in NOT_FEATURES]
+
+
+def pick(models, per_hotel):
+    """Together: {"all": model}. Separated: {"Downtown Hotel": model, "Seaside Hotel": model}."""
+    return {h: m for h, m in models.items() if h != "all"} if per_hotel else {"all": models["all"]}
 
 
 class Solution:
-    def __init__(self, commitments: pd.DataFrame, capacity: dict[str, pd.Series]) -> None:
-        """Called once, before 2017 starts.
-
-        commitments  2017 arrivals booked before 2017-01-01. The hotel already confirmed them, so
-                     decide() is never called for them. Same columns as train.csv, except:
-                     - no cancelled column;
-                     - arrival_date and booking_date are already pandas Timestamps, not strings.
-
-        capacity     hotel -> rooms free on each night of 2017 (indexed by date): the rooms minus
-                     guests who arrived in 2016 and are still in house.
-        """
-        if not PARAMS_PATH.exists():
-            raise FileNotFoundError(f"{PARAMS_PATH} missing: run preprocessing.ipynb (section 3) first")
-        self.params = prep.load_params(PARAMS_PATH)
-        self.counter = prep.RequestCounter()  # running state for the same_request_count feature
+    def __init__(self, commitments, capacity, models=None):
+        """evaluate.py calls Solution(commitments, capacity): the models then train on all three files."""
+        if models is None:
+            rows = pd.concat([load(TRAIN_FILE), load(VALID_FILE), load(TEST_FILE)])
+            models = pick(train(rows, features(rows)), PER_HOTEL)
+        self.models = models
         self.capacity = capacity
-        self.commitments = prep.prepare(commitments, self.params)  # cleaned + features, for later use
+        self.expected = {hotel: defaultdict(float) for hotel in capacity}  # night -> expected guests
+        self.counter = prep.RequestCounter()
 
-    def decide(self, booking: dict) -> bool:
-        """Called once per 2017 booking request, in booking-date order. `booking` is one row with
-        the same columns as commitments, as {column: value}. Return True to confirm the booking,
-        False to reject it."""
-        # Must run for EVERY request (also ones we reject quickly), otherwise the counter drifts.
-        x = prep.prepare(booking, self.params, counter=self.counter)[prep.FEATURES]
+        if not set(next(iter(models.values())).used_features) <= set(commitments.columns):  # raw rows (evaluate.py)
+            commitments = prep.prepare(commitments, PARAMS)
+        for booking, p in zip(commitments.to_dict("records"), self.p_show(commitments)):
+            self.book(booking, p)
 
-        # TODO: p_show = model on x; accept if expected value beats expected walk cost.
-        return True  # placeholder = "accept everything" baseline
+    def decide(self, booking):
+        """evaluate.py: one raw booking -> preprocess (needs PARAMS_FILE) -> accept or reject."""
+        x = prep.prepare(booking, PARAMS, counter=self.counter)
+        return self.accept(booking, self.p_show(x)[0])
+
+    def p_show(self, x):
+        """Probability that the guest shows up, from the joint model or the model of the row's hotel."""
+        key = pd.Series("all", index=x.index) if "all" in self.models else x["hotel"].astype(str)
+        p = pd.Series(0.0, index=x.index)
+        for name, model in self.models.items():
+            rows = key == name
+            if rows.any():
+                p[rows] = 1 - model.predict_proba(x.loc[rows, model.used_features])[:, 1]
+        return p.to_numpy()
+
+    def accept(self, booking, p):
+        """Accept if it pays and the expected guests still fit into the free rooms on every night."""
+        hotel = str(booking["hotel"])
+        nights = pd.date_range(booking["arrival_date"], periods=booking["nights"])
+        fits = all(self.expected[hotel][n] + p <= self.capacity[hotel].get(n, float("inf")) for n in nights)
+        if booking["nightly_rate"] > 0 and fits:
+            self.book(booking, p)
+            return True
+        return False
+
+    def book(self, booking, p):
+        for night in pd.date_range(booking["arrival_date"], periods=booking["nights"]):
+            self.expected[str(booking["hotel"])][night] += p
+
+
+def net_profit(confirmed, capacity):
+    """Check in day by day: the most valuable guests get a room, the cheapest are walked (-2.5x)."""
+    shows = confirmed[confirmed["cancelled"] == 0]
+    total = 0.0
+    for hotel, free in capacity.items():
+        taken = defaultdict(int)  # night -> rooms taken by seated guests
+        for day, guests in shows[shows["hotel"] == hotel].groupby("arrival_date"):
+            values = (guests["nightly_rate"] * guests["nights"]).sort_values(ascending=False)
+            rooms = max(int(free.get(day, ROOMS[hotel])) - taken[day], 0)
+            for nights in guests.loc[values.index[:rooms], "nights"]:
+                for night in pd.date_range(day, periods=nights):
+                    taken[night] += 1
+            total += values.iloc[:rooms].sum() - 2.5 * values.iloc[rooms:].sum()
+    return total
+
+
+if __name__ == "__main__":
+    rows = pd.concat([load(TRAIN_FILE), load(VALID_FILE)])
+    models = train(rows, features(rows))
+
+    test = load(TEST_FILE)
+    start = test["arrival_date"].min()
+    commitments = test[test["booking_date"] < start]  # booked before the test period: already confirmed
+    requests = test[test["booking_date"] >= start].sort_values("booking_date", kind="stable")
+    # Free rooms = rooms minus guests who arrived before the test period, showed up and are still in house
+    stayed = rows[(rows["arrival_date"] < start) & (rows["cancelled"] == 0)
+                  & (rows["arrival_date"] + pd.to_timedelta(rows["nights"], unit="D") > start)]
+    capacity = {}
+    for hotel, rooms in ROOMS.items():
+        free = pd.Series(rooms, index=pd.date_range(start, test["arrival_date"].max()))
+        for arrival, nights in zip(stayed.loc[stayed["hotel"] == hotel, "arrival_date"], stayed.loc[stayed["hotel"] == hotel, "nights"]):
+            free.loc[start: arrival + pd.Timedelta(days=int(nights) - 1)] -= 1
+        capacity[hotel] = free.clip(lower=0)
+
+    for name, per_hotel in [("together", False), ("separated", True)]:
+        solution = Solution(commitments, capacity, pick(models, per_hotel))
+        accepted = [solution.accept(b, p) for b, p in zip(requests.to_dict("records"), solution.p_show(requests))]
+        profit = net_profit(pd.concat([commitments, requests[accepted]]), capacity)
+        print(f"{MODEL} {name:<9} accepted {sum(accepted)} of {len(requests)} requests | net profit on test: {profit:,.0f}")
