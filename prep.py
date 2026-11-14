@@ -24,7 +24,11 @@ import numpy as np
 import pandas as pd
 
 TARGET = "cancelled"
-VALID_START = pd.Timestamp("2016-07-01")  # time split: train before, validate from here on
+
+# Time split by arrival date: train < VALID_START <= valid < TEST_START <= test
+VALID_START = pd.Timestamp("2016-07-01")  # train: 1 year (Jul 2015 - Jun 2016)
+TEST_START = pd.Timestamp("2016-10-01")  # valid: Jul - Sep 2016, test: Oct - Dec 2016
+SPLIT_DIR = Path(__file__).resolve().parent / "data" / "splits"  # written by preprocessing.ipynb, section 4
 
 # Rows that are clearly broken (removed from the training table only, never from the 2017 stream)
 PLACEHOLDER_MIN_ADULTS = 10  # fake group-block rows with 26-55 adults
@@ -63,6 +67,8 @@ REQUEST_KEY_COLUMNS = [
     "nightly_rate", "special_requests", "arrival_date", "booking_date", "nights",
 ]
 
+HOTELS = {"downtown": "Downtown Hotel", "seaside": "Seaside Hotel"}  # short name -> value in the data
+
 CATEGORICAL_FEATURES = list(CATEGORICAL_FALLBACK)
 NUMERIC_FEATURES = [
     "days_ahead", "arrival_week", "arrival_day", "weekend_nights", "weekday_nights", "nights",
@@ -73,6 +79,8 @@ NUMERIC_FEATURES = [
     "is_prt", "has_agent", "has_company", "same_request_count",
 ]
 FEATURES = NUMERIC_FEATURES + CATEGORICAL_FEATURES
+# One model per hotel: `hotel` is constant inside each hotel's data, so leave it out
+FEATURES_PER_HOTEL = [f for f in FEATURES if f != "hotel"]
 
 # Recorded after booking time (still present in every 2017 row) -> test the model with and without them
 HINDSIGHT_FEATURES = ["amendments", "special_requests", "waitlist_days", "country", "is_prt", "deposit"]
@@ -113,7 +121,7 @@ def _bad_row_mask(df: pd.DataFrame) -> pd.Series:
 def fit_params(raw: pd.DataFrame, until: str | pd.Timestamp | None = None) -> dict:
     """Learn category lists, rate caps and reference rates from training data.
 
-    until: only use arrivals before this date (e.g. VALID_START for a strict validation run).
+    until: only use arrivals before this date (e.g. TEST_START, so the test period has no influence).
     """
     df = _to_frame(raw)
     if until is not None:
@@ -275,5 +283,36 @@ def add_training_columns(df: pd.DataFrame) -> pd.DataFrame:
     early = df["arrival_date"] < pd.Timestamp("2015-07-15")
     downtown_gap = (df["hotel"] == "Downtown Hotel") & (df["arrival_date"] < pd.Timestamp("2015-09-01"))
     df["use_for_occupancy"] = ~(early | downtown_gap)
-    df["split"] = np.where(df["arrival_date"] < VALID_START, "train", "valid")
+    df["split"] = np.select(
+        [df["arrival_date"] < VALID_START, df["arrival_date"] < TEST_START], ["train", "valid"], "test"
+    )
+    # Booked before its split started -> would be a confirmed commitment in a replay of that split
+    split_start = df["split"].map({"train": pd.NaT, "valid": VALID_START, "test": TEST_START})
+    df["is_commitment"] = df["booking_date"] < split_start
     return df
+
+
+def load_split(name: str, hotel: str | None = None) -> pd.DataFrame:
+    """Load 'train', 'valid' or 'test' (cleaned + features), written by preprocessing.ipynb section 4.
+
+    There is one file per hotel (data/splits/downtown.parquet, data/splits/seaside.parquet);
+    hotel: 'downtown' / 'seaside' loads one of them, None loads both together.
+    """
+    if name not in ("train", "valid", "test"):
+        raise ValueError(f"unknown split {name!r}, use 'train', 'valid' or 'test'")
+    keys = list(HOTELS) if hotel is None else [_hotel_key(hotel)]
+    parts = []
+    for key in keys:
+        path = SPLIT_DIR / f"{key}.parquet"
+        if not path.exists():
+            raise FileNotFoundError(f"{path} missing: run preprocessing.ipynb (section 4) first")
+        df = pd.read_parquet(path)
+        parts.append(df[df["split"] == name])
+    return pd.concat(parts, ignore_index=True)
+
+
+def _hotel_key(hotel: str) -> str:
+    key = hotel.lower().split()[0]  # accepts 'downtown' and 'Downtown Hotel'
+    if key not in HOTELS:
+        raise ValueError(f"unknown hotel {hotel!r}, use one of {list(HOTELS)}")
+    return key
