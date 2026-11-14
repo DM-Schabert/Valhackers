@@ -1,17 +1,15 @@
 """Shared data cleaning + features for training AND for Solution.decide().
 
 Both places must run the exact same code, otherwise the model sees different features in 2017.
-Rules and reasons: data_preparation.md. Walkthrough: preprocessing.ipynb, section 3.
+What each step does: docs/cleaning_steps.md. Walkthrough: preprocessing.ipynb, section 3.
 
-Training (whole table at once):
-    raw = load_raw("train-template-kit/train.csv")
-    params = fit_params(raw)                      # learned from training data only
-    df = add_training_columns(prepare(raw, params))
-    train = df[~df["drop_for_training"]]
+Training (whole table at once), see train.py:
+    params = fit_params(raw_train, variant="baseline")   # learned from training data only
+    df = add_training_columns(prepare(raw_train, params))
+    X = df[~df["drop_for_training"]][params["features"]]
 
 Inside the Solution (one booking at a time):
-    __init__:  self.params = load_params("data/prep_params.json"); self.counter = RequestCounter()
-    decide():  X = prepare(booking, self.params, counter=self.counter)[FEATURES]
+    decide():  x = prepare(booking, params, counter=counter)[params["features"]]
 """
 from __future__ import annotations
 
@@ -34,8 +32,15 @@ SPLIT_DIR = Path(__file__).resolve().parent / "data" / "splits"  # written by pr
 PLACEHOLDER_MIN_ADULTS = 10  # fake group-block rows with 26-55 adults
 RATE_TYPO_THRESHOLD = 1000.0  # the single EUR 5,400 booking
 
-MIN_ROWS_PER_CATEGORY = 50  # rarer values are grouped into the fallback value
-TOP_COUNTRIES = 20
+# Default preprocessing settings. A variant (VARIANTS below) overrides some of them.
+DEFAULT_SETTINGS = {
+    "top_countries": 20,  # countries kept; all others become "(other)"
+    "min_rows_per_category": 50,  # rarer values (agent, company, room type, ...) become the fallback
+    "rate_cap_quantile": 0.999,  # rate_capped = nightly_rate capped at this quantile per hotel
+    "max_children": 3,  # larger values are typos
+    "max_babies": 2,
+    "drop_features": [],  # features the model does not get
+}
 
 # Categorical column -> value used for rare or unseen values
 CATEGORICAL_FALLBACK = {
@@ -87,6 +92,20 @@ HINDSIGHT_FEATURES = ["amendments", "special_requests", "waitlist_days", "countr
 # Deliberately NOT features: booking_id leaks the target, absolute dates/years don't extrapolate to 2017
 NOT_FEATURES = ["booking_id", "cancelled", "arrival_year", "arrival_month", "arrival_date", "booking_date"]
 
+# =============================================================================================
+# PREPROCESSING VARIANTS -- pick one with PREPROCESSING in train-template-kit/solution.py.
+# A variant overrides DEFAULT_SETTINGS. Add your own: give it a name and the settings it changes.
+# A completely new feature: compute it in _add_features(), add the name to NUMERIC_FEATURES
+# (then every variant gets it, unless the variant lists it in drop_features).
+# =============================================================================================
+VARIANTS = {
+    "baseline": {},
+    "no_country": {"drop_features": ["country", "is_prt"]},  # Portugal artefact: +22k on valid
+    "no_hindsight": {"drop_features": HINDSIGHT_FEATURES},  # only what is known at booking time
+    "no_season": {"drop_features": ["arr_month", "arr_doy", "book_month"]},  # season = 2015 behaviour
+    "fewer_categories": {"top_countries": 10, "min_rows_per_category": 200},
+}
+
 
 # ---------------------------------------------------------------------------------------------
 # Loading
@@ -103,6 +122,12 @@ def _to_frame(data) -> pd.DataFrame:
         df = data.to_frame().T
     else:
         df = pd.DataFrame([data])
+    # Already-cleaned files (e.g. data/splits/*.parquet): plain values again, rare IDs stay rare
+    for col in df.select_dtypes("category").columns:
+        df[col] = df[col].astype(object)
+    for col in ("agent", "company"):
+        if col in df.columns:
+            df[col] = df[col].mask(df[col].eq("other"), -1)
     for col in ("arrival_date", "booking_date"):
         df[col] = pd.to_datetime(df[col])
     for col in RAW_NUMERIC:
@@ -118,11 +143,20 @@ def _bad_row_mask(df: pd.DataFrame) -> pd.Series:
 # ---------------------------------------------------------------------------------------------
 # Step 1: fit the cleaning parameters on training data
 # ---------------------------------------------------------------------------------------------
-def fit_params(raw: pd.DataFrame, until: str | pd.Timestamp | None = None) -> dict:
+def fit_params(raw: pd.DataFrame, until: str | pd.Timestamp | None = None, variant: str = "baseline") -> dict:
     """Learn category lists, rate caps and reference rates from training data.
 
-    until: only use arrivals before this date (e.g. TEST_START, so the test period has no influence).
+    until:   only use arrivals before this date (e.g. TEST_START, so the test period has no influence).
+    variant: preprocessing variant from VARIANTS; stored in the params so prepare() and the model
+             always use the same one.
     """
+    if variant not in VARIANTS:
+        raise ValueError(f"unknown preprocessing variant {variant!r}, use one of {list(VARIANTS)}")
+    settings = {**DEFAULT_SETTINGS, **VARIANTS[variant]}
+    unknown = set(settings["drop_features"]) - set(FEATURES)
+    if unknown:
+        raise ValueError(f"variant {variant!r} drops unknown features: {sorted(unknown)}")
+
     df = _to_frame(raw)
     if until is not None:
         df = df[df["arrival_date"] < pd.Timestamp(until)]
@@ -133,12 +167,12 @@ def fit_params(raw: pd.DataFrame, until: str | pd.Timestamp | None = None) -> di
     for col, fallback in CATEGORICAL_FALLBACK.items():
         counts = base[col].value_counts()
         if col == "country":
-            keep = [c for c in counts.index if c != "(missing)"][:TOP_COUNTRIES] + ["(missing)"]
+            keep = [c for c in counts.index if c != "(missing)"][: settings["top_countries"]] + ["(missing)"]
         else:
-            keep = counts.index[counts >= MIN_ROWS_PER_CATEGORY].tolist()
+            keep = counts.index[counts >= settings["min_rows_per_category"]].tolist()
         categories[col] = sorted(set(keep) | {fallback})
 
-    rate_cap = df.groupby("hotel")["nightly_rate"].quantile(0.999).round(2)
+    rate_cap = df.groupby("hotel")["nightly_rate"].quantile(settings["rate_cap_quantile"]).round(2)
 
     # Reference price per hotel and arrival month, taken from the most recent year that has data
     paid = df.loc[df["nightly_rate"] > 0, ["hotel", "arrival_date", "nightly_rate"]]
@@ -147,6 +181,9 @@ def fit_params(raw: pd.DataFrame, until: str | pd.Timestamp | None = None) -> di
     rate_ref = paid[paid["year"] == latest_year].groupby(["hotel", "month"])["nightly_rate"].median()
 
     return {
+        "variant": variant,
+        "settings": settings,
+        "features": [f for f in FEATURES if f not in settings["drop_features"]],  # what the model gets
         "fitted_until": None if until is None else str(pd.Timestamp(until).date()),
         "categories": categories,
         "rate_cap": {hotel: float(v) for hotel, v in rate_cap.items()},
@@ -193,8 +230,9 @@ def _normalise_categories(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _clean_values(df: pd.DataFrame, params: dict) -> pd.DataFrame:
-    df["children"] = df["children"].fillna(0).clip(upper=3)
-    df["babies"] = df["babies"].clip(upper=2)
+    settings = params.get("settings", DEFAULT_SETTINGS)  # old params files have no settings yet
+    df["children"] = df["children"].fillna(0).clip(upper=settings["max_children"])
+    df["babies"] = df["babies"].clip(upper=settings["max_babies"])
     base = _normalise_categories(df)
     for col, allowed in params["categories"].items():
         values = base[col].where(base[col].isin(allowed), CATEGORICAL_FALLBACK[col])
