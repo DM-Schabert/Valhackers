@@ -26,16 +26,17 @@ from train import train  # noqa: E402
 # INPUT FILES (preprocessed .parquet or .csv with the train.csv columns + features)
 # =============================================================================================
 DATA = HERE.parent / "data"
-TRAIN_FILE = DATA / "splits" / "train.parquet"
-VALID_FILE = DATA / "splits" / "valid.parquet"
-TEST_FILE = DATA / "splits" / "test.parquet"
-PARAMS_FILE = DATA / "prep_params_dev.json"  # optional: feature list; evaluate.py needs it for raw bookings
+SPLITS = DATA / "splits_minimal" 
+TRAIN_FILE = SPLITS / "train.parquet"
+VALID_FILE = SPLITS / "valid.parquet"
+TEST_FILE = SPLITS / "test.parquet"
+PARAMS_FILE = None # DATA / "prep_params_dev.json"  # optional, None for splits_minimal; evaluate.py needs it for raw bookings
 # =============================================================================================
 
 ROOMS = {"Downtown Hotel": 124, "Seaside Hotel": 103}
 NOT_FEATURES = ["cancelled", "booking_id", "arrival_year", "arrival_date", "booking_date",
                 "split", "is_commitment", "use_for_occupancy", "stay_value"]
-PARAMS = json.loads(PARAMS_FILE.read_text()) if PARAMS_FILE.exists() else None
+PARAMS = json.loads(PARAMS_FILE.read_text()) if PARAMS_FILE and PARAMS_FILE.exists() else None
 
 
 def load(path):
