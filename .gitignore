@@ -17,6 +17,3 @@ venv/
 # Keep prep_params.json: the Solution needs it at evaluation time.
 data/*
 !data/prep_params.json
-
-# 2017 data: never commit it (reading it is cheating)
-test.csv

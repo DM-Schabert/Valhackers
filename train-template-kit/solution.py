@@ -20,7 +20,7 @@ import pandas as pd
 HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE), str(HERE.parent)]  # train.py is next to this file, prep.py in the repo root
 import prep  # noqa: E402
-from train import train  # noqa: E402
+from train import MODEL, train  # noqa: E402
 
 # =============================================================================================
 # INPUT FILES (preprocessed .parquet or .csv with the train.csv columns + features)
@@ -32,6 +32,8 @@ VALID_FILE = SPLITS / "valid.parquet"
 TEST_FILE = SPLITS / "test.parquet"
 PARAMS_FILE = None # DATA / "prep_params_dev.json"  # optional, None for splits_minimal; evaluate.py needs it for raw bookings
 # =============================================================================================
+
+PER_HOTEL = False  # submission: False = one model for both hotels, True = one model per hotel
 
 ROOMS = {"Downtown Hotel": 124, "Seaside Hotel": 103}
 NOT_FEATURES = ["cancelled", "booking_id", "arrival_year", "arrival_date", "booking_date",
@@ -53,18 +55,23 @@ def features(df):
     return [c for c in df.select_dtypes(["number", "category"]).columns if c not in NOT_FEATURES]
 
 
+def pick(models, per_hotel):
+    """Together: {"all": model}. Separated: {"Downtown Hotel": model, "Seaside Hotel": model}."""
+    return {h: m for h, m in models.items() if h != "all"} if per_hotel else {"all": models["all"]}
+
+
 class Solution:
-    def __init__(self, commitments, capacity, model=None):
-        """evaluate.py calls Solution(commitments, capacity): the model then trains on all three files."""
-        if model is None:
+    def __init__(self, commitments, capacity, models=None):
+        """evaluate.py calls Solution(commitments, capacity): the models then train on all three files."""
+        if models is None:
             rows = pd.concat([load(TRAIN_FILE), load(VALID_FILE), load(TEST_FILE)])
-            model = train(rows, features(rows))
-        self.model = model
+            models = pick(train(rows, features(rows)), PER_HOTEL)
+        self.models = models
         self.capacity = capacity
         self.expected = {hotel: defaultdict(float) for hotel in capacity}  # night -> expected guests
         self.counter = prep.RequestCounter()
 
-        if not set(model.feature_name_) <= set(commitments.columns):  # raw rows (evaluate.py)
+        if not set(next(iter(models.values())).used_features) <= set(commitments.columns):  # raw rows (evaluate.py)
             commitments = prep.prepare(commitments, PARAMS)
         for booking, p in zip(commitments.to_dict("records"), self.p_show(commitments)):
             self.book(booking, p)
@@ -75,8 +82,14 @@ class Solution:
         return self.accept(booking, self.p_show(x)[0])
 
     def p_show(self, x):
-        """Probability that the guest shows up."""
-        return 1 - self.model.predict_proba(x[self.model.feature_name_])[:, 1]
+        """Probability that the guest shows up, from the joint model or the model of the row's hotel."""
+        key = pd.Series("all", index=x.index) if "all" in self.models else x["hotel"].astype(str)
+        p = pd.Series(0.0, index=x.index)
+        for name, model in self.models.items():
+            rows = key == name
+            if rows.any():
+                p[rows] = 1 - model.predict_proba(x.loc[rows, model.used_features])[:, 1]
+        return p.to_numpy()
 
     def accept(self, booking, p):
         """Accept if it pays and the expected guests still fit into the free rooms on every night."""
@@ -111,7 +124,7 @@ def net_profit(confirmed, capacity):
 
 if __name__ == "__main__":
     rows = pd.concat([load(TRAIN_FILE), load(VALID_FILE)])
-    model = train(rows, features(rows))
+    models = train(rows, features(rows))
 
     test = load(TEST_FILE)
     start = test["arrival_date"].min()
@@ -127,8 +140,8 @@ if __name__ == "__main__":
             free.loc[start: arrival + pd.Timedelta(days=int(nights) - 1)] -= 1
         capacity[hotel] = free.clip(lower=0)
 
-    solution = Solution(commitments, capacity, model)
-    accepted = [solution.accept(b, p) for b, p in zip(requests.to_dict("records"), solution.p_show(requests))]
- 
-    profit = net_profit(pd.concat([commitments, requests[accepted]]), capacity)
-    print(f"accepted {sum(accepted)} of {len(requests)} requests | net profit on test: {profit:,.0f}")
+    for name, per_hotel in [("together", False), ("separated", True)]:
+        solution = Solution(commitments, capacity, pick(models, per_hotel))
+        accepted = [solution.accept(b, p) for b, p in zip(requests.to_dict("records"), solution.p_show(requests))]
+        profit = net_profit(pd.concat([commitments, requests[accepted]]), capacity)
+        print(f"{MODEL} {name:<9} accepted {sum(accepted)} of {len(requests)} requests | net profit on test: {profit:,.0f}")
