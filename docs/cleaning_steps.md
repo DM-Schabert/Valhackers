@@ -12,7 +12,7 @@ The code is in `prep.py`; it runs in `preprocessing.ipynb`, sections 3 (cleaning
 | 5 | `add_training_columns()` | Training only: marks rows to drop (13 placeholder rows + the €5,400 booking), sets `use_for_occupancy` (False for periods with incomplete data), sets `split` by arrival date (`train` < 2016-07-01 ≤ `valid` < 2016-10-01 ≤ `test`), and sets `is_commitment` (valid/test rows booked before their split started). |
 | 6 | Checks | No missing features, the raw rate stays unchanged, unseen values are handled, and one-booking-at-a-time results equal whole-table results. |
 | 7 | Save | `data/train_clean.parquet` (78,118 rows) and `data/prep_params.json` (the fitted parameters). |
-| 8 | Splits | Fits the parameters on train + valid only (`data/prep_params_dev.json`) and writes **one file per hotel**: `data/splits/downtown.parquet` and `data/splits/seaside.parquet`, where the `split` column marks the rows. **train** = Jul 2015 – Jun 2016 (1 year, 48,772 rows), **valid** = Jul – Sep 2016 (¼ year, 14,968 rows), **test** = Oct – Dec 2016 (¼ year, 14,378 rows). Load them with `prep.load_split("train")`. |
+| 8 | Splits | Fits the parameters on train + valid only (`data/prep_params_dev.json`) and writes `data/splits/{train,valid,test}.parquet`, one data source with both hotels in each file. **train** = Jul 2015 – Jun 2016 (1 year, 48,772 rows), **valid** = Jul – Sep 2016 (¼ year, 14,968 rows), **test** = Oct – Dec 2016 (¼ year, 14,378 rows). Load them with `prep.load_split("train")`. |
 
 ## Columns in the processed files
 

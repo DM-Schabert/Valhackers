@@ -295,20 +295,18 @@ def add_training_columns(df: pd.DataFrame) -> pd.DataFrame:
 def load_split(name: str, hotel: str | None = None) -> pd.DataFrame:
     """Load 'train', 'valid' or 'test' (cleaned + features), written by preprocessing.ipynb section 4.
 
-    There is one file per hotel (data/splits/downtown.parquet, data/splits/seaside.parquet);
-    hotel: 'downtown' / 'seaside' loads one of them, None loads both together.
+    One data source for both hotels; hotel: None = both hotels (one joint model),
+    'downtown' / 'seaside' = only that hotel (one model per hotel).
     """
     if name not in ("train", "valid", "test"):
         raise ValueError(f"unknown split {name!r}, use 'train', 'valid' or 'test'")
-    keys = list(HOTELS) if hotel is None else [_hotel_key(hotel)]
-    parts = []
-    for key in keys:
-        path = SPLIT_DIR / f"{key}.parquet"
-        if not path.exists():
-            raise FileNotFoundError(f"{path} missing: run preprocessing.ipynb (section 4) first")
-        df = pd.read_parquet(path)
-        parts.append(df[df["split"] == name])
-    return pd.concat(parts, ignore_index=True)
+    path = SPLIT_DIR / f"{name}.parquet"
+    if not path.exists():
+        raise FileNotFoundError(f"{path} missing: run preprocessing.ipynb (section 4) first")
+    df = pd.read_parquet(path)
+    if hotel is None:
+        return df
+    return df[df["hotel"] == HOTELS[_hotel_key(hotel)]].reset_index(drop=True)
 
 
 def _hotel_key(hotel: str) -> str:
