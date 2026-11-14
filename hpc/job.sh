@@ -1,15 +1,18 @@
 #!/bin/bash
 # Runs on the cluster, inside the uploaded folder. hpc/hpc.sh calls these steps for you.
-#   bash hpc/job.sh setup            create hpc/venv and install the packages
+#   bash hpc/job.sh setup            create hpc/venv (search) and hpc/venv-submission (pinned, submission/requirements.txt)
 #   bash hpc/job.sh test             tiny end-to-end run on one core (about 3 minutes)
 #   bash hpc/job.sh submit           queue the search (array job) and the report (runs after it)
 #   bash hpc/job.sh submit report    queue only the report
 #   bash hpc/job.sh status           queue and progress
+#   bash hpc/job.sh check            queue the end-to-end check of submission/ (log: hpc/logs/submission.out)
+#   bash hpc/job.sh export           queue training + saving submission/model.joblib (log: hpc/logs/model.out)
 #   bash hpc/job.sh here             no scheduler: run all tasks on this machine
 set -euo pipefail
 cd "$(dirname "$(realpath "$0")")/.."
 source hpc/config.sh
 PY=${VENV:-$PWD/hpc/venv}/bin/python
+SUB_PY=$PWD/hpc/venv-submission/bin/python
 STEP=${1:?usage: bash hpc/job.sh setup|test|submit|status|here}
 
 modules() {
@@ -64,6 +67,10 @@ case "$STEP" in
         "$PY" -m pip install --quiet -r hpc/requirements.txt
         "$PY" -c "import sys, pandas, sklearn, lightgbm; print('python', sys.version.split()[0], '| pandas', pandas.__version__, '| scikit-learn', sklearn.__version__, '| lightgbm', lightgbm.__version__)"
         echo "model settings to search: $("$PY" hpc/search.py --count)"
+        [[ -x "$SUB_PY" ]] || python3 -m venv "$(dirname "$(dirname "$SUB_PY")")"
+        "$SUB_PY" -m pip install --quiet --upgrade pip
+        "$SUB_PY" -m pip install --quiet -r submission/requirements.txt
+        "$SUB_PY" -c "import sys, numpy, pandas, sklearn, lightgbm; print('submission: python', sys.version.split()[0], '| numpy', numpy.__version__, '| pandas', pandas.__version__, '| scikit-learn', sklearn.__version__, '| lightgbm', lightgbm.__version__)"
         ;;
     test)
         modules
@@ -78,7 +85,11 @@ case "$STEP" in
         ;;
     submit)
         mkdir -p hpc/logs
-        if [[ "${2:-}" == report ]]; then
+        if [[ "${2:-}" == check ]]; then
+            echo "submission check job $(queue submission "$REPORT_MIN") (at most $REPORT_MIN min, log: hpc/logs/submission.out)"
+        elif [[ "${2:-}" == export ]]; then
+            echo "model export job $(queue model "$REPORT_MIN") (at most $REPORT_MIN min, log: hpc/logs/model.out)"
+        elif [[ "${2:-}" == report ]]; then
             echo "report job $(queue report "$REPORT_MIN")"
         else
             search=$(queue search "$SEARCH_MIN" "$TASKS")
@@ -99,6 +110,25 @@ case "$STEP" in
         "$PY" hpc/report.py
         "$PY" hpc/tuned_solution.py --check
         ;;
+    check)
+        bash hpc/job.sh submit check
+        ;;
+    export)
+        bash hpc/job.sh submit export
+        ;;
+    submission | model)
+        modules
+        export OMP_NUM_THREADS=$CPUS
+        if [[ ! -x "$SUB_PY" ]]; then
+            echo "hpc/venv-submission is missing: run 'bash hpc/hpc.sh setup' first" >&2
+            exit 1
+        fi
+        if [[ "$STEP" == submission ]]; then
+            "$SUB_PY" submission/check.py
+        else
+            "$SUB_PY" submission/export_model.py
+        fi
+        ;;
     status)
         modules
         if command -v squeue >/dev/null 2>&1; then
@@ -112,6 +142,9 @@ case "$STEP" in
             echo "report: ready, fetch it with 'bash hpc/hpc.sh fetch'"
         else
             echo "report: not written yet"
+        fi
+        if [[ -f submission/model.joblib ]]; then
+            echo "model.joblib: ready, fetch it with 'bash hpc/hpc.sh fetch'"
         fi
         ;;
     here)

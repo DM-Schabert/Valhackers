@@ -3,7 +3,7 @@
 From the raw data to the search on the HPC: what we did, what we found, and why we decided each thing the way we did.
 
 - **Sections 1–10: round one**, with one validation window. All numbers come from `grid_search/compare.py` and `grid_search/grid_search.py`.
-- **Sections 11–14: round two**, built to run on the HPC in under an hour. It fixes what round one got wrong. The search has not run yet; its numbers will be in `hpc/results/RESULTS.md`.
+- **Sections 11–14: round two**, built to run on the HPC in under an hour. It fixes what round one got wrong. It ran on DTU's cluster in 14 minutes; the results are in section 11.8 and `hpc/results/RESULTS.md`.
 - **Section 13** lists every major decision with its reason. [Reproduce](#reproduce) is at the end.
 
 ---
@@ -214,7 +214,7 @@ Round one left four lessons. Each one led to a change:
 | Every model predicts too few cancellations | **Calibration** on the most recent 90 days, **recency weights**, and `alpha` as a direct correction (11.2, 11.4) |
 | The feature set matters more than the hyperparameters | **More feature-set variants**, a drop-one-group study, and only a small hyperparameter grid (11.2, 11.3) |
 
-The search runs on the HPC (section 12). **It has not run yet**, so this section explains the method and the reasons. The numbers will be in `hpc/results/RESULTS.md`.
+The search ran on the HPC (section 12). Sections 11.1–11.7 explain the method and the reasons; section 11.8 has the results. The full tables are in `hpc/results/RESULTS.md`.
 
 ```
 train.csv
@@ -357,7 +357,7 @@ Why this way: with 831 × 252 candidates and only four windows, the single best 
 - **The fast replay matches the original scoring code.** In a small test run (five rules on a two-week window), its net profit equalled `net_profit` from `solution.py` to the cent.
 - **The `Solution` class matches the search.** `hpc/tuned_solution.py --check` replays a window through `decide()`, one raw booking at a time, the way the template describes the evaluation. In a small test run, both paths gave 665,899 (1,618 of 2,851 requests accepted). The report job on the HPC repeats this check for the chosen settings and appends it to `RESULTS.md`.
 
-Both checks were small local test runs (two short windows, six model settings). The full search has only been dry-run, not executed.
+The first check was a small local test run. The report job repeats the second check for the chosen settings: on the cluster, `decide()` and the search agreed exactly (section 11.8).
 
 ### 11.7 Size and time limit
 
@@ -367,9 +367,59 @@ Both checks were small local test runs (two short windows, six model settings). 
 | Accept rules | 252 per hotel |
 | Parallel tasks | 32 array tasks × 2 cores (`hpc/config.sh`) |
 | Time limits | A search task starts no new setting after 30 minutes and is killed at 38. The report job is killed at 20. So **at most 58 minutes of run time**, plus the wait in the queue |
-| Expected run time | Roughly 10–20 minutes per task. This is an estimate scaled up from the small test run, not a measurement on the cluster |
+| Actual run time | 7–9 minutes per search task (at most 548 MB of memory), 5 minutes for the report. **14 minutes** from submitting to the finished report, all 831 settings done |
 
 If the time runs out: the settings are processed in a fixed random order, so a cut-off run is still an even sample of the grid. The report works with whatever finished. Submitting again continues where it stopped, because finished settings are skipped.
+
+### 11.8 Results
+
+**Chosen settings** (`hpc/results/best.json`):
+- **Model:** a blend of 70% logistic regression (`C=0.3`) and 30% LightGBM (600 trees, 15 leaves).
+- **Data:** feature set `no_calendar`, no calibration, no recency weights, one model for both hotels.
+- **Accept rule, the same for both hotels:** `alpha` 1.1, `z` 0, `beta` 0.1. That means room for 10% more expected guests than there are free rooms, and a small preference for bookings above the normal price.
+
+**Net profit against the current submission** (logistic regression with the `train.py` settings, original rule):
+
+| Window | Current submission | Chosen, picked without this window* | Gain | Chosen, picked on all windows |
+|---|---|---|---|---|
+| `jan-aug` | 3,614,480 (58.9%) | ≈ 3,876,000 (65.4%) | ≈ +261,000 | 4,010,947 (68.7%) |
+| `apr-nov` | 3,110,049 (57.5%) | ≈ 3,332,000 (71.1%) | ≈ +222,000 | 3,332,087 (71.1%) |
+| `jul-dec` | 1,491,300 (63.9%) | ≈ 1,688,000 (80.0%) | ≈ +197,000 | 1,688,899 (80.0%) |
+| `oct-dec` | 766,999 (63.5%) | ≈ 837,000 (79.3%) | ≈ +70,000 | 860,521 (84.5%) |
+| **Average share** | **61.0%** | **74.0%** | **+13.0 pp** | 76.1% |
+
+\* The held-out check from 11.5: the settings were chosen on the other three windows. The euros are reconstructed from the shares, which are rounded to 0.1%. The windows overlap in time (11.1), so even this column is somewhat optimistic.
+
+**Where the gain comes from: the rule, not the model.**
+- With the original rule, the chosen model is within ±35,000 of the current submission in every window. `alpha` 1.1 and `beta` 0.1 add 84,000–380,000 per window.
+- Going from `alpha` 1.0 to 1.1 improves every one of the four windows. In share: 63.5 → 68.7%, 68.3 → 71.1%, 77.6 → 80.0% and 78.0 → 84.5%.
+- The reason: the chosen model predicts 22–29% cancellations, but 35–39% actually happen. So the expected guests are too high and the hotel looks full too early. `alpha` 1.1 makes up for it.
+- **Not luck:** every `alpha` from 1.025 to 1.15 scores within 0.4 points of the best, so it's a plateau and not a single peak.
+- **`z` makes no difference** (0, 0.5 and 1 score the same). An extra safety margin only shifts the threshold by a few rooms, and `alpha` already sets the threshold.
+- **`beta` 0.1–0.2 adds 2–3 points**, while 0.4 is too much. Taking the price into account helps, but only a little. That fits the about-13% upper limit from 11.4.
+- **A separate rule per hotel fits the past better but loses on the held-out windows** (71.6% vs 74.0%). The held-out check caught this, so both hotels get one rule.
+
+**Models and hyperparameters barely matter once the rule is tuned.**
+- At their best, the blend, logistic regression and LightGBM are within 0.3 points of each other (76.1%, 75.9% and 75.8%).
+- `C` 0.03 regularises too strongly (about −3 points on average). Apart from that, `C`, bins, trees, leaves and `min_child_samples` each move the average by about 1 point or less.
+- One model per hotel loses about 4 points on average. Recency weights are slightly worse (−0.9 points).
+
+**Calibration loses to `alpha`.**
+- With the original rule, calibration helps (+1.6 to +2.5 points), because nothing else corrects the bias.
+- With `alpha` tuned, it hurts. For the chosen model and features: none 76.1%, isotonic 74.1%, sigmoid 73.6%.
+- The worst case is `jan-aug` (isotonic 61.4% vs none 68.7%). There the correction is learned on October–December and applied to January–August, the same situation as calibrating on late 2016 for 2017. In that window the calibration model also had only three months of training data, so part of the loss comes from that.
+- One overall correction (`alpha`) works better than a curve learned in another season.
+
+**Features: the calendar hurts, and `country` changes sides.**
+- **Calendar features hurt.** `no_calendar` is the best feature set: each calendar month appears only once or twice in the training data.
+- **`country` with the original rule:** dropping it helps by 4–10 points, which is round one's finding.
+- **`country` with a tuned rule:** dropping it hurts by 1–2 points. Most of the harm `country` did came from the too-low cancellation predictions it causes, and `alpha` now corrects that. Exception: in `jan-aug`, which trains only on 2015 where the Portugal artefact is strongest, dropping `country` is still better (71.4% vs 68.7%).
+- **Removing the fields recorded after booking costs 3–6 points** (`no_hindsight`).
+- **Feature groups:** for logistic regression with a tuned rule, the ones that matter most are `deposit` (−2.2 points when removed), agent/company (−2.0) and guest history (−1.5). Removing the duplicate count, the guest counts or the weekdays changes almost nothing.
+
+**The `Solution` class reproduces the search.** All raw October–December bookings went one at a time through `hpc/tuned_solution.py`. That gave 860,521, exactly the search's number (2,610 of 5,457 requests accepted), at 45.5 ms per booking on the cluster.
+
+**Comparison with `submission/`** (prep_v2 + CatBoost with isotonic calibration + the bid-price rule): its reported result on October–December 2016 is 823,400, with the same setup (its first-come reference value, 901,761, matches exactly). The chosen settings give 860,521 when chosen with this window, and about 837,000 when chosen without it. The bid-price rule was chosen on this one window only, and it hasn't been through the four-window comparison yet (section 14).
 
 ---
 
@@ -410,17 +460,47 @@ What comes back with `fetch`:
 
 Optional, before `go`: `bash hpc/hpc.sh upload && bash hpc/hpc.sh setup && bash hpc/hpc.sh test` runs a tiny end-to-end version on the cluster's login node (about 3 minutes on one core). It catches installation problems before any queue time is spent.
 
-Using the result for the submission:
+### The submission (`submission/`)
+
+`submission/` holds the search's winner, and it doesn't depend on `hpc/`:
+
+| File | What it is |
+|---|---|
+| `submission/solution.py` | The `Solution` class. The chosen model and rule settings are written at the top, copied from `best.json` |
+| `submission/prep.py` | A copy of `claude-preprocessing/prep.py`. The duplicate count also works if a 2017 booking lacks `booking_id` or another raw column |
+| `submission/check.py` | End-to-end check: trains on arrivals before October 2016, feeds Oct–Dec 2016 through `decide()` one raw booking at a time, and compares with the search (860,521) |
+| `submission/export_model.py` | Trains the final model on all of `train.csv` and saves it as `submission/model.joblib`, so the evaluation doesn't have to train. It reloads the file and checks that the predictions are identical |
+| `submission/model.joblib` | The trained model: preprocessing parameters, logistic regression, LightGBM. It is made on the cluster |
+| `submission/requirements.txt` | Exact package versions: those of the laptop the evaluation runs on. The cluster builds a second environment with them (`hpc/venv-submission`) for the check and the export |
+
+**Why the versions are pinned.** A saved model only loads reliably with the same versions of numpy, pandas, scikit-learn and LightGBM. The search's environment on the cluster has newer ones than the laptop. So the model is exported in a cluster environment that matches the laptop.
+
+`Solution` checks the file before using it: the model settings, `prep.py` and the package versions must match. If they don't, or if the file is missing, it trains from `train.csv` instead. That takes about a minute and gives the same decisions, so the submission works either way.
 
 ```python
 import sys
-sys.path.insert(0, "hpc")
-from tuned_solution import Solution    # reads hpc/results/best.json
+sys.path.insert(0, "submission")
+from solution import Solution
 
 evaluate(Solution)
 ```
 
-At start-up, `Solution` fits the preprocessing and the chosen model on all of `train.csv`. Then it applies the chosen rule of each hotel to every booking.
+At start-up, `Solution` loads `model.joblib`. Without a usable file, it fits the preprocessing and the blend on all of `train.csv` (next to `solution.py`, or in `train-template-kit/`). After that, `decide()` applies the overbooking rule to every booking. It needs the packages in `submission/requirements.txt`.
+
+Before submitting, run both steps on the cluster. Training a model locally is exactly what we avoid:
+
+```bash
+bash hpc/hpc.sh check      # end-to-end check; hpc/logs/submission.out should say MATCH
+bash hpc/hpc.sh export     # trains the final model and saves submission/model.joblib
+bash hpc/hpc.sh fetch      # copies model.joblib and the logs back
+python submission/export_model.py --status   # no training: "usable here" means the laptop will load it
+```
+
+Then commit `submission/model.joblib`. It's a few MB.
+
+If the search is run again and `best.json` changes, update the settings at the top of `submission/solution.py`. `check.py` reports a mismatch between the two.
+
+The previous submission (prep_v2 + CatBoost + bid prices, by David) is in git commit `e92558c`.
 
 ---
 
@@ -435,31 +515,31 @@ Every major decision in one place.
 | 3 | One preprocessing module for training and `decide()` | Cleaning in a notebook | 2017 bookings arrive one at a time and must be cleaned exactly like the training data |
 | 4 | Keep the full pipeline | Minimal preprocessing, PCA | +13,000 over minimal. PCA removes the category information |
 | 5 | Don't use `booking_id` | Using it (AUC 0.82 alone) | It's a row number that leaks the target. Needs the organisers' OK |
-| 6 | Test feature sets without `country` and without calendar features | Always all features | `country` is partly a recording artefact (+10,000 without it). Each calendar month is seen only once or twice |
+| 6 | Test feature sets without `country` and without calendar features | Always all features | `country` is partly a recording artefact (+10,000 without it). Each calendar month is seen only once or twice. **Result:** calendar features dropped, `country` kept. With a tuned rule it helps (11.8) |
 | 7 | Four long rolling windows | One validation quarter | The best setting on one quarter lost 25,000 on the next. 2017 is a long window where most bookings are requests |
 | 8 | Refit the preprocessing per window | One set of parameters for all | Otherwise reference prices from the window itself leak in, which 2017 won't have |
 | 9 | Score = share of the possible gain, averaged over the windows | Sum of euros | Euros depend on the window's length and season, so one window would dominate |
 | 10 | Logistic regression, LightGBM and a blend | Also XGBoost, CatBoost, a neural network | The three tree libraries were within 1% of each other. One library is simpler on the cluster |
 | 11 | Small hyperparameter grid, larger preprocessing grid | A deep hyperparameter search | Hyperparameters moved profit by ±1,000, feature sets by 7,000–20,000 |
-| 12 | Calibration on the latest 90 days, and recency weights | Using raw probabilities only | Every model predicted too few cancellations. The rule adds probabilities up, so they must be right in absolute terms |
+| 12 | Calibration on the latest 90 days, and recency weights | Using raw probabilities only | Every model predicted too few cancellations. The rule adds probabilities up, so they must be right in absolute terms. **Result:** both lost to tuning `alpha`, so the chosen settings use neither (11.8) |
 | 13 | Accept rule with `alpha`, `z`, `beta` | The original rule; a full bid-price model | `alpha` fixes the bias, `z` covers the risk (walks cost 3.5× the gain), `beta` favours better-paying bookings. Each has one clear job, and the original rule is included |
 | 14 | Normal approximation for the risk | Monte Carlo simulation | With 100+ bookings per night it is accurate, and it costs nothing per decision |
-| 15 | Rules may differ per hotel | One rule for both | The hotels differ a lot and share no rooms. The held-out check decides whether it helps |
+| 15 | Rules may differ per hotel | One rule for both | The hotels differ a lot and share no rooms. The held-out check decides whether it helps. **Result:** it doesn't (71.6% vs 74.0% held out), so one rule for both |
 | 16 | Pick a plateau: average over neighbouring `alpha` values | The single best value | A lone peak is usually luck |
 | 17 | The held-out check picks the scheme | Trusting the best average | With 209,000 candidates and four windows, the best number is partly luck |
 | 18 | Train once, replay all rules in one pass | One run per rule | 838,000 replays for the cost of 3,324 trainings. Checked against the original scoring code |
 | 19 | Plain grid in random order, with a time budget | Optuna; a fixed order | No shared database, restartable, an early stop still covers the grid evenly, and it yields the tables for the report |
 | 20 | Everything heavy runs on the cluster, in under an hour | Running on the laptop | The laptop stays free. The time limits are enforced by the scheduler |
+| 21 | Overbook by 10% (`alpha` 1.1) with a small price tilt (`beta` 0.1) | The original rule; calibrating the probabilities | +13 points of held-out share, and it improves all four windows. It sits on a broad plateau (1.025–1.15) |
 
 ---
 
 ## 14. Still open
 
-- **The HPC search has not run yet.** Until it has, there is no `best.json`, and sections 11–13 describe a method, not a result.
-- **`train-template-kit/solution.py` is still broken** (`No module named 'prep'`): the "tidy up everything" commit moved `prep.py` into `claude-preprocessing/`, and the splits now live in `claude-preprocessing/data/splits/`. Two lines need fixing. `hpc/tuned_solution.py` doesn't depend on it.
-- **`decide()` is slow:** about 34 ms per booking in the test run, almost all of it in `prep.prepare()` on a single row. The template `Solution` calls it the same way. For tens of thousands of 2017 requests that is several minutes.
+- **The bid-price submission has not been compared on equal terms.** `submission/` now holds the search's winner (section 12). The previous version (prep_v2, CatBoost with isotonic calibration and bid prices, git commit `e92558c`) was chosen on October–December 2016 only. A fair comparison would run both through the same four windows. Two of its findings work against `submission/`: isotonic calibration lost to `alpha`, and the risk check (reject at a 1/3.5 overflow chance) is more cautious than the original rule, while the search found that accepting more is better. Bid prices can only be judged on windows from July 2016 on, because their forecast needs the same weeks one year earlier.
+- **`decide()` is slow:** 45.5 ms per booking on the cluster, almost all of it in `prep.prepare()` on a single row. If 2017 has as many requests as January–August 2016 (26,846), that's about 20 minutes. It's worth checking whether the evaluation has a time limit.
 - **Package versions.** The code was tested with Python 3.14, pandas 3.0, scikit-learn 1.8 and LightGBM 4.6. On the cluster, a Python of 3.11 or newer gets the same major versions. `bash hpc/hpc.sh test` shows quickly whether an older one works too.
-- **Not explored:** a bid-price model, booking-pace features, and `booking_id` (11.2, 11.4).
+- **Not in the search:** bid prices (built in `submission/`, see the first point), booking-pace features and `booking_id` (11.2, 11.4).
 - **`claude-preprocessing/data/` is not in git.** Only round one needs it. `hpc/` reads `train-template-kit/train.csv` directly.
 - **LightGBM and parallel runs:** LightGBM ignores `OMP_NUM_THREADS`, so several processes side by side start one thread per core each and slow down about 500×. Both `grid_search.py` and `hpc/search.py` pass the thread count to LightGBM explicitly.
 

@@ -1,30 +1,39 @@
-"""Local end-to-end check of the submission, run the way evaluate.py runs it.
+"""End-to-end check of the submission, run the way evaluate.py runs it. Trains a model: run it on the HPC.
 
-    python submission/check.py
+    bash hpc/hpc.sh check          (or here: python submission/check.py)
 
-Learns from arrivals before 2016-10-01 (calibration on Jul-Sep 2016) and replays Oct-Dec 2016 from train.csv:
-commitments (booked before 1 Oct, cancelled column removed) go into Solution(...), every later request goes
-through decide() as a raw row in booking order. Prints the net profit; the same setup in
-train-template-kit/compare_strategies.py on splits_v2 gave 823,4k for CatBoost isotonic + BidPrice.
+Learns from arrivals before 2016-10-01 and replays Oct-Dec 2016 from train.csv: commitments (booked before
+1 Oct, cancelled column removed) go into Solution(...), every later request goes through decide() as a raw
+booking dict, in booking order. The net profit should equal what the HPC search computed for the same
+window (hpc/results/best.json, "oct-dec"): 860,521 with 2,610 of 5,457 requests accepted. The check runs
+with the pinned versions of submission/requirements.txt; if those differ from the search's, the models
+can come out very slightly different, so a small difference is possible, a large one is a bug.
+This check always trains; model.joblib is tested by export_model.py.
 """
+import json
 import time
 from collections import defaultdict
+from pathlib import Path
 
 import pandas as pd
 
-from solution import TRAIN_CSV, Solution
+import prep
+import solution
+from solution import Solution
 
-START, END = pd.Timestamp("2016-10-01"), pd.Timestamp("2016-12-31")
+START, END = pd.Timestamp("2016-10-01"), pd.Timestamp("2017-01-01")
 ROOMS = {"Downtown Hotel": 124, "Seaside Hotel": 103}
+BEST = Path(__file__).resolve().parent.parent / "hpc" / "results" / "best.json"
+SEARCH_RESULT = 860521
 
 
-def free_rooms(raw):
-    """Rooms minus guests who arrived before START, showed up and are still in house."""
-    stayed = raw[(raw["arrival_date"] < START) & (raw["cancelled"] == 0)
-                 & (raw["arrival_date"] + pd.to_timedelta(raw["nights"], unit="D") > START)]
+def free_rooms(history, period):
+    """Rooms minus guests who arrived before START, showed up and are still in house (as in the search)."""
+    stayed = history[(history["arrival_date"] < START) & (history["cancelled"] == 0)
+                     & (history["arrival_date"] + pd.to_timedelta(history["nights"], unit="D") > START)]
     capacity = {}
     for hotel, rooms in ROOMS.items():
-        free = pd.Series(rooms, index=pd.date_range(START, END))
+        free = pd.Series(rooms, index=pd.date_range(START, period["arrival_date"].max()))
         h = stayed[stayed["hotel"] == hotel]
         for arrival, nights in zip(h["arrival_date"], h["nights"]):
             free.loc[START: arrival + pd.Timedelta(days=int(nights) - 1)] -= 1
@@ -48,19 +57,39 @@ def net_profit(confirmed, capacity):
     return total
 
 
+def settings_match():
+    """The settings written into solution.py against the search's best.json, if it is there."""
+    if not BEST.exists():
+        return "hpc/results/best.json not found, settings not compared"
+    best = json.loads(BEST.read_text())
+    model = {"model": "blend", "weight": solution.LOGREG_WEIGHT, "per_hotel": False, "features": "no_calendar",
+             "half_life": 0, "calibration": "none"}
+    rule = {"alpha": solution.ALPHA, "z": solution.Z, "beta": solution.BETA}
+    if best["model"] == model and all(r == rule for r in best["rules"].values()):
+        return "settings in solution.py match hpc/results/best.json"
+    return f"MISMATCH: best.json has {best['model']} {best['rules']}"
+
+
 if __name__ == "__main__":
-    raw = pd.read_csv(TRAIN_CSV, parse_dates=["arrival_date", "booking_date"])
-    window = raw[(raw["arrival_date"] >= START) & (raw["arrival_date"] <= END)]
+    print(settings_match())
+    print(f"package versions: {solution.fingerprint()['versions']}")
+    raw = prep.load_raw(solution.train_csv())
+    window = raw[(raw["arrival_date"] >= START) & (raw["arrival_date"] < END)]
     commitments = window[window["booking_date"] < START]
     requests = window[window["booking_date"] >= START].sort_values("booking_date", kind="stable")
-    capacity = free_rooms(raw)
+    history = raw[(raw["arrival_date"] < START) & ~prep._bad_row_mask(raw)]
+    capacity = free_rooms(history, window)
 
     t0 = time.time()
-    solution = Solution(commitments.drop(columns="cancelled"), capacity, train_end=START)
+    s = Solution(commitments.drop(columns="cancelled"), capacity, train_end=START)
     print(f"Solution ready in {time.time() - t0:.0f}s, {len(commitments):,} commitments")
     t0 = time.time()
-    accepted = [solution.decide(b) for b in requests.drop(columns="cancelled").to_dict("records")]
-    print(f"decide() on {len(requests):,} requests in {time.time() - t0:.0f}s, accepted {sum(accepted):,}")
-
-    print(f"net profit Oct-Dec 2016: {net_profit(pd.concat([commitments, requests[accepted]]), capacity):,.0f}")
-    print(f"reference reject all:    {net_profit(commitments, capacity):,.0f}")
+    accepted = [s.decide(b) for b in requests.drop(columns="cancelled").to_dict("records")]
+    seconds = time.time() - t0
+    print(f"decide() on {len(requests):,} requests in {seconds:.0f}s ({1000 * seconds / len(requests):.1f} ms each), "
+          f"accepted {sum(accepted):,}")
+    profit = net_profit(pd.concat([commitments, requests[accepted]]), capacity)
+    print(f"net profit Oct-Dec 2016: {profit:,.0f}")
+    verdict = "MATCH" if round(profit) == SEARCH_RESULT else f"DIFFERENT by {profit - SEARCH_RESULT:+,.0f}"
+    print(f"HPC search, same window: {SEARCH_RESULT:,}  ->  {verdict}")
+    print(f"reference, reject all:   {net_profit(commitments, capacity):,.0f}")
