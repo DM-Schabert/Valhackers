@@ -173,3 +173,14 @@ These fields hold their final values, not their values when the booking came in.
 3. Treat `agent`, `company` and `country` as categories; map `meal` "Undefined" to SC; cap or drop the €5,400 rate.
 4. Build a **local replay of 2016**: 2016 arrivals booked before 2016-01-01 act as `commitments`, capacity is 124 / 103 minus 2015 guests still staying, and the rest go to `decide()` in booking-date order. Score it with the same revenue and walk-penalty rules.
 5. Strategy: estimate each booking's chance of showing up, and accept it if its expected value beats the expected walk cost for the nights it covers. Capacity matters most from March to October.
+
+
+
+
+
+
+
+
+
+
+
