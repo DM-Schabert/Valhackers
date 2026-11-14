@@ -14,7 +14,9 @@ Features:
 - no country, no season, no lead-time steps, no combinations: those made valid AND test worse (ablation).
 """
 import json
+import math
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -39,6 +41,69 @@ VARIANTS = {  # features each variant leaves out
     "baseline": [],
     "no_hindsight": ["amendments", "special_requests", "log_waitlist_days"],  # only what is known at booking time
 }
+
+
+# Raw columns that define an "identical request" (every raw column except booking_id and cancelled)
+KEY_COLUMNS = ["hotel", "days_ahead", "arrival_year", "arrival_month", "arrival_week", "arrival_day",
+               "weekend_nights", "weekday_nights", "adults", "children", "babies", "meal", "country",
+               "sales_segment", "sales_channel", "returning_guest", "past_cancellations", "past_stays",
+               "room_type", "amendments", "deposit", "agent", "company", "waitlist_days", "guest_type",
+               "nightly_rate", "special_requests", "arrival_date", "booking_date", "nights"]
+RAW_NUMERIC = ["days_ahead", "arrival_year", "arrival_week", "arrival_day", "weekend_nights", "weekday_nights",
+               "adults", "children", "babies", "returning_guest", "past_cancellations", "past_stays", "amendments",
+               "agent", "company", "waitlist_days", "nightly_rate", "special_requests", "nights"]
+
+
+def to_frame(data):
+    """A DataFrame, a Series or a single booking dict -> DataFrame with parsed dates and numeric columns."""
+    if isinstance(data, pd.DataFrame):
+        df = data.copy()
+    elif isinstance(data, pd.Series):
+        df = data.to_frame().T
+    else:
+        df = pd.DataFrame([data])
+    for col in ("arrival_date", "booking_date"):
+        df[col] = pd.to_datetime(df[col])
+    for col in RAW_NUMERIC:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+class RequestCounter:
+    """Running count of identical requests seen so far (group blocks = many identical rows on one booking day).
+    decide() sees one booking at a time, so the count has to be remembered between calls; training replays
+    the whole table in booking order through the same counter, so both give exactly the same numbers."""
+
+    def __init__(self):
+        self.seen = defaultdict(int)
+
+    def see(self, row):
+        key = tuple(_key_value(v) for v in row)
+        count = self.seen[key]
+        self.seen[key] = count + 1
+        return count
+
+
+def _key_value(v):
+    if v is None or (isinstance(v, float) and math.isnan(v)) or v is pd.NaT:
+        return None
+    if isinstance(v, pd.Timestamp):
+        return v.value
+    if isinstance(v, (int, float, np.integer, np.floating)):
+        return float(v)
+    return str(v)
+
+
+def same_request_counts(df, counter=None):
+    if counter is None:  # batch (training): replay the whole table in booking order
+        counter = RequestCounter()
+        by = ["booking_date", "booking_id"] if "booking_id" in df.columns else ["booking_date"]
+        order = df.sort_values(by, kind="stable").index
+    else:  # online (decide): rows already arrive in booking order
+        order = df.index
+    rows = df.loc[order].reindex(columns=KEY_COLUMNS).itertuples(index=False, name=None)
+    return pd.Series([counter.see(r) for r in rows], index=order, dtype="int64").reindex(df.index)
 
 
 def bad_rows(df):
@@ -82,13 +147,13 @@ def fit_params(train, variant="baseline"):
     }
 
 
-def prepare(df, params):
-    """Clean + add all features. Raw nightly_rate stays untouched (revenue is computed on it)."""
-    df = df.copy()
+def prepare(data, params, counter=None):
+    """Clean + add all features. Raw nightly_rate stays untouched (revenue is computed on it).
+    counter=None -> batch: `data` is the whole request table (training).
+    counter given -> online: one booking (dict) at a time in booking order (solution.decide)."""
+    df = to_frame(data)
     # identical requests already seen on the same booking date (group blocks cancel a lot)
-    key = [c for c in df.columns if c not in ("booking_id", "cancelled")]
-    order = df.sort_values(["booking_date", "booking_id"]).index
-    df["same_request_count"] = df.loc[order].groupby(key, dropna=False, sort=False).cumcount().reindex(df.index)
+    df["same_request_count"] = same_request_counts(df, counter)
 
     df["children"] = df["children"].fillna(0).clip(upper=3)
     df["babies"] = df["babies"].clip(upper=2)
@@ -99,7 +164,7 @@ def prepare(df, params):
     for col in ("days_ahead", "nightly_rate", "waitlist_days", "past_cancellations", "past_stays", "same_request_count"):
         df[f"log_{col}"] = np.log1p(df[col].clip(lower=0))
     month = df["arrival_date"].dt.month.astype(str)
-    df["rate_rel"] = df["nightly_rate"] / (cats["hotel"] + "|" + month).map(params["rate_ref"])
+    df["rate_rel"] = df["nightly_rate"] / (cats["hotel"] + "|" + month).map(params["rate_ref"]).astype(float)
 
     for col, allowed in params["categories"].items():  # rare / unseen values -> "other"
         df[col] = pd.Categorical(cats[col].where(cats[col].isin(allowed), "other"), categories=allowed)

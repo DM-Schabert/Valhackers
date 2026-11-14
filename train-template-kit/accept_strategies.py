@@ -39,7 +39,14 @@ def phi(x):
 # 1. Baseline: the original rule (expected guests + p must fit on every night)
 # ---------------------------------------------------------------------------------------------
 class Baseline(Solution):
-    pass
+    def accept(self, booking, p):
+        """Original rule: accept if it pays and the expected guests still fit on every night."""
+        hotel = str(booking["hotel"])
+        fits = all(self.expected[hotel][n] + p <= self.capacity[hotel].get(n, float("inf")) for n in nights_of(booking))
+        if booking["nightly_rate"] > 0 and fits:
+            self.book(booking, p)
+            return True
+        return False
 
 
 # ---------------------------------------------------------------------------------------------
@@ -184,125 +191,15 @@ class Hybrid(MonteCarlo, Threshold):
 
 
 # ---------------------------------------------------------------------------------------------
-# 6. ExactPB: exact Poisson-binomial distribution of shows per night (no normal approximation)
+# 6./7. ExactPB and BidPrice now live in solution.Solution (risk check + bid prices)
 # ---------------------------------------------------------------------------------------------
 class ExactPB(Solution):
-    """dist[(hotel, night)][k] = P(k shows) for k < C, last entry = P(>= C shows)."""
-    Q_MAX = 1 / (1 + WALK_COST)
-
-    def __init__(self, *args, **kwargs):
-        self.dist = {}
-        super().__init__(*args, **kwargs)
-
-    def _dist(self, hotel, night):
-        d = self.dist.get((hotel, night))
-        if d is None:
-            cap = self.capacity[hotel].get(night, None)
-            if cap is None:  # night outside the capacity window: unconstrained
-                return None
-            d = np.zeros(int(cap) + 1)
-            d[0] = 1.0
-            self.dist[(hotel, night)] = d
-        return d
-
-    def book(self, booking, p):
-        super().book(booking, p)
-        hotel = str(booking["hotel"])
-        for night in nights_of(booking):
-            d = self._dist(hotel, night)
-            if d is None or len(d) == 1:
-                continue
-            new = d * (1 - p)
-            new[1:] += d[:-1] * p
-            new[-1] += d[-1] * p  # ">= C" bucket is absorbing
-            self.dist[(hotel, night)] = new
-
-    def q(self, booking):
-        hotel = str(booking["hotel"])
-        tails = [d[-1] for d in (self._dist(hotel, n) for n in nights_of(booking)) if d is not None]
-        return max(tails, default=0.0)
-
-    def accept(self, booking, p):
-        if booking["nightly_rate"] > 0 and self.q(booking) < self.Q_MAX:
-            self.book(booking, p)
-            return True
-        return False
+    """Exact risk check only (bid prices switched off)."""
+    THETA = 0.0
 
 
-# ---------------------------------------------------------------------------------------------
-# 7. BidPrice: ExactPB risk check + opportunity cost of each night from an LP over forecast demand
-# ---------------------------------------------------------------------------------------------
-_HISTORY = {}
-
-
-def history(files):
-    """Training bookings (cached). For a final submission add TEST_FILE to HISTORY_FILES."""
-    key = tuple(str(f) for f in files)
-    if key not in _HISTORY:
-        _HISTORY[key] = pd.concat([load(f) for f in files])
-    return _HISTORY[key]
-
-
-class BidPrice(ExactPB):
-    """Forecast of future requests = last year's bookings shifted by 52 weeks (same weekday), scaled by
-    year-over-year growth. Once per booking day and hotel solve
-        max sum v_j x_j   s.t.  sum_{j covers n} x_j <= free_n - expected_shows_n,   0 <= x_j <= growth
-    over last year's shown bookings that are still to come. The dual of night n = bid price of night n.
-    Accept if the risk check passes and stay value >= THETA * sum of the stay's bid prices."""
-    THETA = 1.0
-    SHIFT = pd.Timedelta(days=364)
-    HISTORY_FILES = (TRAIN_FILE, VALID_FILE)
-
-    def __init__(self, *args, **kwargs):
-        self.bids = {}  # hotel -> (day, {night: bid})
-        super().__init__(*args, **kwargs)
-        rows = history(self.HISTORY_FILES)
-        self.demand = {}
-        for hotel, cap in self.capacity.items():
-            h = rows[(rows["hotel"].astype(str) == hotel) & (rows["cancelled"] == 0)]
-            end = rows["arrival_date"].max()
-            recent = ((rows["hotel"].astype(str) == hotel) & (rows["arrival_date"] > end - pd.Timedelta(days=91))).sum()
-            before = ((rows["hotel"].astype(str) == hotel) & (rows["arrival_date"] > end - pd.Timedelta(days=91) - self.SHIFT)
-                      & (rows["arrival_date"] <= end - self.SHIFT)).sum()
-            growth = recent / before if before else 1.0
-            arr = h["arrival_date"] + self.SHIFT
-            h = h[(arr >= cap.index.min()) & (arr <= cap.index.max())]
-            self.demand[hotel] = (pd.DataFrame({
-                "booked": h["booking_date"] + self.SHIFT, "arrival": h["arrival_date"] + self.SHIFT,
-                "nights": h["nights"].astype(int), "value": h["nightly_rate"] * h["nights"]}), growth)
-
-    def bid_prices(self, hotel, today):
-        from scipy.optimize import linprog
-        from scipy.sparse import lil_matrix
-        demand, growth = self.demand[hotel]
-        future = demand[(demand["booked"] > today) & (demand["value"] > 0)]
-        cap = self.capacity[hotel]
-        nights = cap.index[cap.index >= today]
-        if future.empty or len(nights) == 0:
-            return {}
-        pos = {n: i for i, n in enumerate(nights)}
-        A = lil_matrix((len(nights), len(future)))
-        for j, (arrival, k) in enumerate(zip(future["arrival"], future["nights"])):
-            for n in pd.date_range(arrival, periods=k):
-                if n in pos:
-                    A[pos[n], j] = 1
-        free = np.array([max(cap[n] - self.expected[hotel][n], 0.0) for n in nights])
-        res = linprog(-future["value"].to_numpy(), A_ub=A.tocsr(), b_ub=free, bounds=(0, growth), method="highs")
-        if res.status != 0:
-            return {}
-        return dict(zip(nights, -res.ineqlin.marginals))
-
-    def accept(self, booking, p):
-        if booking["nightly_rate"] <= 0 or self.q(booking) >= self.Q_MAX:
-            return False
-        hotel, today = str(booking["hotel"]), booking["booking_date"]
-        if self.bids.get(hotel, (None,))[0] != today:
-            self.bids[hotel] = (today, self.bid_prices(hotel, today))
-        bids = self.bids[hotel][1]
-        if stay_value(booking) >= self.THETA * sum(bids.get(n, 0.0) for n in nights_of(booking)):
-            self.book(booking, p)
-            return True
-        return False
+class BidPrice(Solution):
+    """Exact risk check + bid prices = the submitted Solution."""
 
 
 def variant(cls, **params):
@@ -324,10 +221,10 @@ STRATEGIES = [
 ]
 
 
-def setup():
+def setup(train_file=TRAIN_FILE, valid_file=VALID_FILE, test_file=TEST_FILE):
     """Same test setup as solution.py: train rows, commitments, requests, free-room capacity."""
-    rows = pd.concat([load(TRAIN_FILE), load(VALID_FILE)])
-    test = load(TEST_FILE)
+    rows = pd.concat([load(train_file), load(valid_file)])
+    test = load(test_file)
     start = test["arrival_date"].min()
     commitments = test[test["booking_date"] < start]
     requests = test[test["booking_date"] >= start].sort_values("booking_date", kind="stable")
@@ -351,7 +248,7 @@ if __name__ == "__main__":
     results = []
     for cls in STRATEGIES:
         t0 = time.time()
-        solution = cls(commitments, capacity, models)
+        solution = cls(commitments, capacity, models, history=rows)
         if p_requests is None:
             p_requests = solution.p_show(requests)  # same model for all strategies: predict once
         accepted = [solution.accept(b, p) for b, p in zip(requests.to_dict("records"), p_requests)]

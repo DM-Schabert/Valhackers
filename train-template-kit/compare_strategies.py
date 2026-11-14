@@ -5,6 +5,8 @@ Probability sources: each model in train.py, raw (fit on train+valid) and isoton
 
 Run: python train-template-kit/compare_strategies.py   -> prints tables, writes strategy_results.csv
 """
+import json
+import sys
 import time
 from pathlib import Path
 
@@ -16,7 +18,8 @@ import accept_strategies as A
 import train as T
 from solution import TRAIN_FILE, VALID_FILE, features, load, net_profit
 
-MODELS = ["lightgbm", "catboost", "xgboost", "logreg"]
+T.CALIBRATION_DAYS = 0  # "raw" = uncalibrated; the isotonic column calibrates on valid itself
+MODELS = ["lightgbm", "catboost", "xgboost", "logreg", "mlp"]
 STRATEGIES = [
     A.Baseline,
     A.Threshold,
@@ -24,6 +27,7 @@ STRATEGIES = [
     A.MonteCarlo,
     A.BidPrice,
     A.variant(A.BidPrice, THETA=0.5),
+    A.variant(A.BidPrice, MAX_GROWTH=1.0),
 ]
 
 
@@ -36,8 +40,7 @@ class Fixed:
         return np.c_[1 - c, c]
 
 
-def probability_sources(rows, tr, va, com, req):
-    feats = features(rows)
+def probability_sources(rows, tr, va, com, req, feats):
     out = {}
     for name in MODELS:
         t0 = time.time()
@@ -59,10 +62,16 @@ def probability_sources(rows, tr, va, com, req):
 
 
 if __name__ == "__main__":
-    rows, com, req, cap = A.setup()
-    tr, va = load(TRAIN_FILE), load(VALID_FILE)
+    # optional argument: a splits folder, e.g. data/splits_v2 (uses its params.json feature list if present)
+    splits = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else TRAIN_FILE.parent
+    files = [splits / f"{s}.parquet" for s in ("train", "valid", "test")]
+    rows, com, req, cap = A.setup(*files)
+    tr, va = load(files[0]), load(files[1])
+    params = splits / "params.json"
+    feats = json.loads(params.read_text())["features"] if params.exists() else features(rows)
+    print(f"splits: {splits} | {len(feats)} features")
     print("training probability sources ...")
-    sources = probability_sources(rows, tr, va, com, req)
+    sources = probability_sources(rows, tr, va, com, req, feats)
 
     calib, results = [], []
     for src, (pc_com, pc_req) in sources.items():
@@ -74,7 +83,7 @@ if __name__ == "__main__":
         recs = req2.to_dict("records")
         for cls in STRATEGIES:
             t0 = time.time()
-            s = cls(com2, cap, {"all": Fixed()})
+            s = cls(com2, cap, {"all": Fixed()}, history=rows)
             P = 1 - pc_req
             accepted = [s.accept(b, p) for b, p in zip(recs, P)]
             profit = net_profit(pd.concat([com, req[accepted]]), cap)
@@ -93,6 +102,6 @@ if __name__ == "__main__":
     print("\nAccepted requests:")
     print(res.pivot(index="strategy", columns="source", values="accepted")[[s for s in sources]]
           .reindex([c.__name__ for c in STRATEGIES]).to_string())
-    out = Path(__file__).with_name("strategy_results.csv")
+    out = Path(__file__).with_name(f"strategy_results_{splits.name}.csv")
     res.to_csv(out, index=False)
     print(f"\nsaved {out}")
