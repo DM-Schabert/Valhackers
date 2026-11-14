@@ -18,7 +18,7 @@ from pathlib import Path
 import pandas as pd
 
 HERE = Path(__file__).resolve().parent
-sys.path[:0] = [str(HERE), str(HERE.parent)]  # train.py is next to this file, prep.py in the repo root
+sys.path[:0] = [str(HERE), str(HERE.parent / "claude-preprocessing")]  # train.py next to this file, prep.py in claude-preprocessing/
 import prep  # noqa: E402
 from train import MODEL, train  # noqa: E402
 
@@ -26,11 +26,11 @@ from train import MODEL, train  # noqa: E402
 # INPUT FILES (preprocessed .parquet or .csv with the train.csv columns + features)
 # =============================================================================================
 DATA = HERE.parent / "data"
-SPLITS = DATA / "splits" 
+SPLITS = DATA / "splits_v2" 
 TRAIN_FILE = SPLITS / "train.parquet"
 VALID_FILE = SPLITS / "valid.parquet"
 TEST_FILE = SPLITS / "test.parquet"
-PARAMS_FILE =  DATA / "prep_params_dev.json"  # optional, None for splits_minimal; evaluate.py needs it for raw bookings
+PARAMS_FILE =  DATA / SPLITS / "params.json"  # optional, None for splits_minimal; evaluate.py needs it for raw bookings
 # =============================================================================================
 
 PER_HOTEL = False  # submission: False = one model for both hotels, True = one model per hotel

@@ -26,6 +26,9 @@ def make_model(X):
         as_text = FunctionTransformer(lambda X: X.astype({c: str for c in cats}))
         return make_pipeline(as_text, CatBoostClassifier(iterations=500, learning_rate=0.05, cat_features=cats,
                                                          random_seed=0, verbose=0))
+
+
+    
     if MODEL == "logreg":  # one-hot categories, fill gaps in numbers, scale
         numbers = [c for c in X.columns if c not in cats]
         columns = make_column_transformer(
@@ -33,6 +36,9 @@ def make_model(X):
             (make_pipeline(SimpleImputer(strategy="median"), StandardScaler()), numbers))
         return make_pipeline(columns, LogisticRegression(max_iter=2000))
     raise ValueError(f"unknown MODEL {MODEL!r}")
+
+
+
 
 
 def fit(rows, features):
