@@ -11,7 +11,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, StandardScaler
 from xgboost import XGBClassifier
 
-MODEL = "lightgbm"  # "lightgbm" | "catboost" | "xgboost" | "logreg"
+MODEL = "logreg"  # "lightgbm" | "catboost" | "xgboost" | "logreg"
 
 
 def make_model(X):

@@ -26,11 +26,11 @@ from train import MODEL, train  # noqa: E402
 # INPUT FILES (preprocessed .parquet or .csv with the train.csv columns + features)
 # =============================================================================================
 DATA = HERE.parent / "data"
-SPLITS = DATA / "splits_minimal" 
+SPLITS = DATA / "splits" 
 TRAIN_FILE = SPLITS / "train.parquet"
 VALID_FILE = SPLITS / "valid.parquet"
 TEST_FILE = SPLITS / "test.parquet"
-PARAMS_FILE = None # DATA / "prep_params_dev.json"  # optional, None for splits_minimal; evaluate.py needs it for raw bookings
+PARAMS_FILE =  DATA / "prep_params_dev.json"  # optional, None for splits_minimal; evaluate.py needs it for raw bookings
 # =============================================================================================
 
 PER_HOTEL = False  # submission: False = one model for both hotels, True = one model per hotel
